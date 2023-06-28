@@ -1,0 +1,1 @@
+docker build -t mediapipe_unity:linux . -f docker/linux/x86_64/Dockerfile
