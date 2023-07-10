@@ -1,0 +1,188 @@
+name: Package-mediapipe-only
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      packageName:
+        type: string
+        default: package
+      bazelBuildArgs:
+        type: string
+        default: '--experimental_scale_timeouts=10.0 --http_timeout_scaling=10.0'
+      linuxBuildArgs:
+        type: string
+        default: '--desktop gpu --opencv cmake'
+      androidBuildArgs:
+        type: string
+        default: '--android fat --android_ndk_api_level 21'
+      macosBuildArgs:
+        type: string
+        default: '--desktop cpu --opencv cmake --macos_universal'
+      iosBuildArgs:
+        type: string
+        default: '--ios arm64'
+      windowsBuildArgs:
+        type: string
+        default: '--desktop cpu --opencv cmake'
+
+jobs:
+  print-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print inputs for debug
+        run: |
+          echo 'inputs.ref=${{ inputs.ref }}'
+          echo 'inputs.bazelBuildArgs=${{ inputs.bazelBuildArgs }}'
+          echo 'inputs.linuxBuildArgs=${{ inputs.linuxBuildArgs }}'
+          echo 'inputs.androidBuildArgs=${{ inputs.androidBuildArgs }}'
+          echo 'inputs.macosBuildArgs=${{ inputs.macosBuildArgs }}'
+          echo 'inputs.iosBuildArgs=${{ inputs.iosBuildArgs }}'
+          echo 'inputs.windowsBuildArgs=${{ inputs.windowsBuildArgs }}'
+
+  linux-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Build a Docker image
+        run: |
+          docker build --no-cache --build-arg UID=$(id -u) -t mediapipe_unity:latest . -f docker/linux/x86_64/Dockerfile
+
+      - name: Build
+        run: |
+          docker run --rm \
+            --mount type=bind,src=$PWD/Packages,dst=/home/mediapipe/Packages \
+            --mount type=bind,src=$PWD/Assets,dst=/home/mediapipe/Assets \
+            mediapipe_unity:latest \
+            python build.py build --bazel_build_opts="${{ inputs.bazelBuildArgs }}" ${{ inputs.linuxBuildArgs }} -vv
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ inputs.packageName }}-base
+          path: .
+
+  android-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Build a Docker image
+        run: |
+          docker build --no-cache --build-arg UID=$(id -u) -t mediapipe_unity:latest . -f docker/linux/x86_64/Dockerfile
+
+      - name: Remove unused files to free up space
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
+          df -h
+
+      - name: Build
+        run: |
+          docker run --rm \
+            --mount type=bind,src=$PWD/Packages,dst=/home/mediapipe/Packages \
+            --mount type=bind,src=$PWD/Assets,dst=/home/mediapipe/Assets \
+            mediapipe_unity:latest \
+            python build.py build --bazel_build_opts="${{ inputs.bazelBuildArgs }}" ${{ inputs.androidBuildArgs }} -vv
+
+      - name: Upload mediapipe_android.aar
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ inputs.packageName }}-mediapipe_android.aar
+          path: Packages/com.github.homuler.mediapipe/Runtime/Plugins/Android/mediapipe_android.aar
+
+  macos-build:
+    runs-on: macos-12
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Setup Python
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install NumPy
+        run: pip install --no-cache-dir --user numpy
+
+      - name: Build libmediapipe_c.dylib
+        run: |
+          unset ANDROID_NDK_HOME
+          python build.py build --bazel_build_opts="${{ inputs.bazelBuildArgs }}" ${{ inputs.macosBuildArgs }} -vv
+
+      - name: Upload libmediapipe_c.dylib
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ inputs.packageName }}-libmediapipe_c.dylib
+          path: Packages/com.github.homuler.mediapipe/Runtime/Plugins/libmediapipe_c.dylib
+
+  ios-build:
+    runs-on: macos-12
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Setup Python
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install NumPy
+        run: pip install --no-cache-dir --user numpy
+
+      - name: Build bazel to circumvent a compile error
+        run: |
+          mkdir bin
+          git clone https://github.com/bazelbuild/bazel.git --depth 1 --single-branch --branch  6.1.1
+          cd bazel
+          git apply ../third_party/bazel_ios_workaround.diff
+          bazel build --java_runtime_version=remotejdk_11 //src:bazel
+          cp bazel-bin/src/bazel ../bin
+          cd ..
+          echo "bin" >> $GITHUB_PATH
+
+      - name: Build MediaPipeUnity.framework
+        run: |
+          unset ANDROID_NDK_HOME
+          sed -i -e 's/PLEASE_SET_YOUR_BUNDLE_ID_HERE/com.github.homuler.mediapipe.unity/g' mediapipe_api/objc/BUILD
+          python build.py build --bazel_build_opts="${{ inputs.bazelBuildArgs }}" ${{ inputs.iosBuildArgs }} -vv
+
+      - name: Upload MediaPipeUnity.framework
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ inputs.packageName }}-MediaPipeUnity.framework
+          path: Packages/com.github.homuler.mediapipe/Runtime/Plugins/iOS/MediaPipeUnity.framework
+
+  windows-build:
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Build a Docker image
+        run: |
+          docker build --no-cache -t mediapipe_unity:latest . -f docker/windows/x86_64/Dockerfile
+        shell: cmd
+        timeout-minutes: 60
+
+      - name: Build
+        run: |
+          docker run --rm --cpus=2 --memory=8g ^
+            --mount type=bind,src=%CD%\Packages,dst=C:\mediapipe\Packages ^
+            --mount type=bind,src=%CD%\Assets,dst=C:\mediapipe\Assets ^
+            mediapipe_unity:latest ^
+            python build.py build --bazel_build_opts="${{ inputs.bazelBuildArgs }}" ${{ inputs.windowsBuildArgs }} -vv
+        shell: cmd
+
+      - name: Upload mediapipe_c.dll
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ inputs.packageName }}-mediapipe_c.dll
+          path: Packages/com.github.homuler.mediapipe/Runtime/Plugins/mediapipe_c.dll
